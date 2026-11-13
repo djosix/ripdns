@@ -1,16 +1,16 @@
 # ripdns
 
-類似 nip.io / sslip.io 的 DNS server，但 hostname 中的 IPv4 必須以 secret 簽章並加密，只有持有 secret 的人能產生可解析的名稱。
+A DNS server like nip.io / sslip.io, except that the IPv4 address in the hostname must be signed and encrypted with a secret, so only holders of the secret can create resolvable names.
 
 ```
 a.b.web-147bcd0b56ab08fd-v2.route.example.com  ->  A 203.0.113.7
 ```
 
-base domain 以外的查詢可以 relay 給 upstream DNS server。單一靜態 binary，Docker image 約 5 MB，執行時記憶體約 2 MB。
+Queries outside the base domain can be relayed to upstream DNS servers. Single static binary, ~5 MB Docker image, ~2 MB of memory at runtime.
 
-## Token 格式
+## Token format
 
-token 為 16 個 hex 字元（8 bytes）：
+A token is 16 hex characters (8 bytes):
 
 ```
 tag   = HMAC-SHA256(secret, "ripdns/v1/mac" || ip)[0:4]
@@ -18,11 +18,11 @@ pad   = HMAC-SHA256(secret, "ripdns/v1/pad" || tag)[0:4]
 token = hex( (ip XOR pad) || tag )
 ```
 
-`ip` 為 IPv4 的 4 個 raw bytes，`secret` 直接以字串 bytes 作為 HMAC key。解碼時由 `tag` 算出 `pad` 還原 `ip`，再驗證 `tag == HMAC(secret, "ripdns/v1/mac" || ip)[0:4]`。輸出為小寫 hex，解碼不分大小寫（resolver 可能做 0x20 大小寫隨機化）。
+`ip` is the 4 raw bytes of the IPv4 address, and the bytes of the `secret` string are used directly as the HMAC key. Decoding derives `pad` from `tag`, recovers `ip`, then checks `tag == HMAC(secret, "ripdns/v1/mac" || ip)[0:4]`. Tokens are emitted as lowercase hex and decoded case-insensitively, since resolvers may randomize case (0x20 encoding).
 
-與「`ip XOR mac || mac`」的差別：若 XOR 的對象就是附在後面的 MAC，任何知道格式的人把前後 4 bytes 互相 XOR 就能還原 IPv4。這裡改用 secret 從 tag 衍生出 pad，結構一樣是「4 bytes 密文 + 4 bytes MAC」，但沒有 secret 就無法還原 IPv4，也無法偽造 token。
+Why not `ip XOR mac || mac`: if the XOR key is the MAC appended right after it, anyone who knows the format can XOR the two halves and recover the IPv4 address. Here the pad is derived from the tag with the secret. The layout is still "4 bytes ciphertext + 4 bytes MAC", but without the secret the IPv4 address cannot be recovered and tokens cannot be forged.
 
-其他語言只需 HMAC-SHA256 即可實作，Python 參考實作：
+Any language with HMAC-SHA256 can implement it. Python reference implementation:
 
 ```python
 import hmac, hashlib, ipaddress
@@ -49,7 +49,7 @@ def decode(secret: bytes, token: str) -> str | None:
     return str(ipaddress.IPv4Address(raw)) if ok else None
 ```
 
-測試向量（secret 為 `test-secret`）：
+Test vectors (secret `test-secret`):
 
 | IPv4 | token |
 |---|---|
@@ -58,69 +58,69 @@ def decode(secret: bytes, token: str) -> str | None:
 | 192.168.1.100 | `7ce72d1256395a05` |
 | 255.255.255.255 | `258ef3f04c9d5e71` |
 
-Go 程式可直接 import `github.com/djosix/ripdns/token`。
+Go programs can import `github.com/djosix/ripdns/token` directly.
 
-## 名稱規則
+## Name rules
 
-層級從 base domain 往左數：`a.b.c.route.example.com` 中 `c` 是第 1 層、`b` 是第 2 層、`a` 是第 3 層。
+Levels are counted leftwards from the base domain: in `a.b.c.route.example.com`, `c` is level 1, `b` is level 2 and `a` is level 3.
 
-1. 名稱不在 base domain 底下：relay 或 REFUSED。
-2. subdomain 層數超過 `RIPDNS_MAX_LEVELS`：NXDOMAIN。
-3. 取第 `RIPDNS_TOKEN_LEVEL` 層的 label，以 `-` 切成 tokens；`RIPDNS_TOKEN_LEVEL=0` 時把每一層的 tokens 依第 1 層、第 2 層…的順序串起來。
-4. tokens 數量超過 `RIPDNS_MAX_TOKENS`：NXDOMAIN。
-5. 從頭依序找第一個能通過驗證的 token，找到就回應對應的 IPv4，否則 NXDOMAIN。
+1. Name not under the base domain: relay or REFUSED.
+2. More subdomain levels than `RIPDNS_MAX_LEVELS`: NXDOMAIN.
+3. Take the label at level `RIPDNS_TOKEN_LEVEL` and split it on `-` into tokens. With `RIPDNS_TOKEN_LEVEL=0`, the tokens of every level are concatenated in order level 1, level 2, and so on.
+4. More tokens than `RIPDNS_MAX_TOKENS`: NXDOMAIN.
+5. Scan the tokens in order and answer with the IPv4 address of the first one that verifies; otherwise NXDOMAIN.
 
-以 `route.example.com` 為例，`T` 代表合法 token：
+With base domain `route.example.com`, where `T` is a valid token:
 
-| 名稱 | 預設（1, 0, 0） | `MAX_LEVELS=1` | `MAX_TOKENS=1` | `TOKEN_LEVEL=2` | `TOKEN_LEVEL=0` |
+| Name | Default (1, 0, 0) | `MAX_LEVELS=1` | `MAX_TOKENS=1` | `TOKEN_LEVEL=2` | `TOKEN_LEVEL=0` |
 |---|---|---|---|---|---|
-| `T.route.example.com` | 解析 | 解析 | 解析 | NXDOMAIN | 解析 |
-| `a.b.T.route.example.com` | 解析 | NXDOMAIN | 解析 | NXDOMAIN | 解析 |
-| `app-T-v2.route.example.com` | 解析 | 解析 | NXDOMAIN | NXDOMAIN | 解析 |
-| `T.x.route.example.com` | NXDOMAIN | NXDOMAIN | NXDOMAIN | 解析 | 解析 |
+| `T.route.example.com` | resolves | resolves | resolves | NXDOMAIN | resolves |
+| `a.b.T.route.example.com` | resolves | NXDOMAIN | resolves | NXDOMAIN | resolves |
+| `app-T-v2.route.example.com` | resolves | resolves | NXDOMAIN | NXDOMAIN | resolves |
+| `T.x.route.example.com` | NXDOMAIN | NXDOMAIN | NXDOMAIN | resolves | resolves |
 
-`0` 代表不限。`RIPDNS_TOKEN_LEVEL` 大於 `RIPDNS_MAX_LEVELS`（且後者不為 0）時啟動會報錯。
+`0` means unlimited. Startup fails if `RIPDNS_TOKEN_LEVEL` is greater than a non-zero `RIPDNS_MAX_LEVELS`.
 
-## 回應行為
+## Responses
 
-| 查詢 | 回應 |
+| Query | Response |
 |---|---|
-| 合法名稱的 A / ANY | A record，AA flag |
-| 合法名稱的其他類型（如 AAAA） | NOERROR 無 answer，authority 帶 SOA（NODATA） |
-| base domain 底下不合法的名稱 | NXDOMAIN，authority 帶 SOA |
-| base domain 本身的 SOA / NS | SOA；NS 取自 `RIPDNS_NS` |
-| 其他名稱，client 在 `RIPDNS_RELAY_ALLOW` 內 | 依序轉送至 `RIPDNS_UPSTREAM`，全部失敗回 SERVFAIL |
-| 其他名稱，未設 upstream 或 client 不在允許清單 | REFUSED |
+| A / ANY for a valid name | A record, AA flag set |
+| Other types (e.g. AAAA) for a valid name | NOERROR with no answer and SOA in authority (NODATA) |
+| Invalid name under the base domain | NXDOMAIN with SOA in authority |
+| SOA / NS for the base domain itself | SOA; NS from `RIPDNS_NS` |
+| Other names, client in `RIPDNS_RELAY_ALLOW` | Relayed to `RIPDNS_UPSTREAM` in order; SERVFAIL if all fail |
+| Other names, no upstream or client not allowed | REFUSED |
 
-relay 會沿用 client 的傳輸協定：UDP 回應過大時保留 TC flag，client 會改用 TCP 重查。
+Relays use the client's transport: an oversized UDP response keeps the TC flag, so the client retries over TCP.
 
-## 設定
+## Configuration
 
-所有設定皆為 `RIPDNS_*` 環境變數，說明見 [`.env.example`](.env.example)。程式啟動時若目前目錄有 `.env` 會自動載入，可用 `-env FILE` 指定其他檔案；已存在的環境變數優先。
+All settings are `RIPDNS_*` environment variables, documented in [`.env.example`](.env.example). On startup, `.env` in the current directory is loaded if present; use `-env FILE` to load another file. Variables already set in the environment take precedence.
 
 ```sh
 cp .env.example .env
 sed -i "s/^RIPDNS_SECRET=.*/RIPDNS_SECRET=$(openssl rand -hex 32)/" .env
 ```
 
-## 建置與使用
+## Build and usage
 
 ```sh
 go build -trimpath -ldflags="-s -w" -o ripdns .
-# Ubuntu x86_64 交叉編譯
+# Cross-compile for Ubuntu x86_64
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ripdns .
 ```
 
 ```sh
-ripdns serve                          # 啟動 server（不帶子命令時同為 serve）
-ripdns encode 203.0.113.7 10.0.0.1    # 產生 token 與完整 hostname
-ripdns decode a.web-147bcd0b56ab08fd.route.example.com   # 依名稱規則驗證
+ripdns serve                          # run the server (default when no subcommand is given)
+ripdns encode 203.0.113.7 10.0.0.1    # print tokens and full hostnames
+ripdns decode a.web-147bcd0b56ab08fd.route.example.com   # check a name against the rules
 dig @127.0.0.1 147bcd0b56ab08fd.route.example.com
 ```
 
 ## Docker image
 
-image 發布於 Docker Hub 的 `djosix/ripdns`，支援 linux/amd64 與 linux/arm64。
+The image is published on Docker Hub as `djosix/ripdns` for linux/amd64 and linux/arm64.
 
 ```sh
 docker pull djosix/ripdns:latest
@@ -132,44 +132,44 @@ docker run -d --name ripdns --restart unless-stopped \
     -e RIPDNS_UPSTREAM=1.1.1.1,8.8.8.8 \
     djosix/ripdns:latest
 
-# 產生 token
+# Generate a token
 docker run --rm -e RIPDNS_SECRET=<secret> -e RIPDNS_BASE_DOMAIN=route.example.com \
     djosix/ripdns:latest encode 203.0.113.7
 ```
 
-也可以用 `--env-file .env -e RIPDNS_LISTEN=:53` 帶入設定，或直接 `docker compose up -d`（`compose.yaml` 會讀取 `.env`，本機沒有 image 時自動建置）。Ubuntu 上若保留 systemd-resolved，`-p` 需指定 host IP，例如 `-p 192.168.1.10:53:53/udp`，見下方說明。
+You can also pass settings with `--env-file .env -e RIPDNS_LISTEN=:53`, or run `docker compose up -d` (`compose.yaml` reads `.env` and builds the image if it is not available locally). On Ubuntu with systemd-resolved kept running, `-p` must name a host IP, e.g. `-p 192.168.1.10:53:53/udp`; see below.
 
-image 以 uid 65534 執行。bridge 網路下 Docker 預設允許 container 內的非 root 使用者 bind 53 port；改用 `--network host` 時不適用，需加上 `--user 0:0`。
+The image runs as uid 65534. On bridge networks Docker lets non-root users in the container bind port 53 by default; this does not apply to `--network host`, which needs `--user 0:0`.
 
-## 在 Ubuntu 上執行
+## Running on Ubuntu
 
-Ubuntu 的 systemd-resolved 會在 `127.0.0.53:53`（24.04 另有 `127.0.0.54:53`）提供 stub resolver。ripdns 若監聽 `:53` 或 Docker 發布 `0.0.0.0:53` 會出現 `bind: address already in use`。依用途擇一處理。
+On Ubuntu, systemd-resolved runs a stub resolver on `127.0.0.53:53` (plus `127.0.0.54:53` on 24.04). Listening on `:53`, or publishing `0.0.0.0:53` with Docker, fails with `bind: address already in use`. Pick one of the options below.
 
-### 方式一：停用 stub listener，由 ripdns 佔用 :53
+### Option 1: disable the stub listener and let ripdns own :53
 
-適合專門跑 DNS 的主機。
+Suited to hosts dedicated to DNS.
 
 ```sh
 sudo mkdir -p /etc/systemd/resolved.conf.d
 printf '[Resolve]\nDNSStubListener=no\n' | sudo tee /etc/systemd/resolved.conf.d/ripdns.conf
 sudo systemctl restart systemd-resolved
-# /etc/resolv.conf 原本指向 127.0.0.53，改指向 resolved 產生的實際 upstream 清單
+# /etc/resolv.conf pointed at 127.0.0.53; point it at the real upstream list resolved generates
 sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 ```
 
-此時主機本身的解析不經過 ripdns。若主機也要使用 ripdns，可把 `/etc/resolv.conf` 換成內容為 `nameserver 127.0.0.1` 的一般檔案；ripdns 的 upstream 是直接設定的 IP，不會形成迴圈。
+The host's own lookups then bypass ripdns. To make the host use ripdns too, replace `/etc/resolv.conf` with a regular file containing `nameserver 127.0.0.1`. ripdns upstreams are configured as IP addresses, so this does not create a loop.
 
-### 方式二：保留 systemd-resolved，綁定指定 IP
+### Option 2: keep systemd-resolved and bind specific IPs
 
-綁定特定位址不會與 `127.0.0.53:53` 衝突，不可使用 `:53` 或 `0.0.0.0:53`：
+Binding specific addresses does not conflict with `127.0.0.53:53`. Do not use `:53` or `0.0.0.0:53`:
 
 ```sh
 RIPDNS_LISTEN=192.168.1.10:53,127.0.0.1:53
 ```
 
-使用 Docker compose 時在 `.env` 加上 `RIPDNS_HOST_IP=192.168.1.10`，compose 只會發布在該 IP。
+With Docker compose, add `RIPDNS_HOST_IP=192.168.1.10` to `.env` so compose publishes only on that IP.
 
-### 以 systemd 執行 binary
+### Running the binary with systemd
 
 ```sh
 sudo install -m 0755 ripdns /usr/local/bin/ripdns
@@ -181,48 +181,48 @@ sudo systemctl enable --now ripdns
 journalctl -u ripdns -f
 ```
 
-unit 使用 `DynamicUser` 以非特權使用者執行，只透過 `AmbientCapabilities=CAP_NET_BIND_SERVICE` 取得 bind 53 port 的權限。
+The unit runs as an unprivileged `DynamicUser` and only gets permission to bind port 53 through `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
 
-## 公開委派
+## Public delegation
 
-若要讓外部 resolver 也能解析，在上層 zone（如 `example.com`）加上委派，NS 名稱必須位於 base domain 之外：
+To let external resolvers resolve the names, delegate from the parent zone (e.g. `example.com`). The NS name must be outside the base domain:
 
 ```
 route.example.com.     NS  ns-route.example.com.
-ns-route.example.com.  A   <ripdns 主機的公網 IP>
+ns-route.example.com.  A   <public IP of the ripdns host>
 ```
 
-並設定 `RIPDNS_NS=ns-route.example.com`。防火牆開放 UDP 與 TCP 53。`RIPDNS_RELAY_ALLOW` 預設只允許私有網段使用 relay，外部 client 只能查詢 base domain，請勿設成 `0.0.0.0/0,::/0`，否則會成為可被用於 DNS amplification 的 open resolver。
+Then set `RIPDNS_NS=ns-route.example.com` and open UDP and TCP port 53 in the firewall. By default `RIPDNS_RELAY_ALLOW` only lets private networks use the relay, so external clients can only query the base domain. Do not set it to `0.0.0.0/0,::/0`, or the server becomes an open resolver that can be abused for DNS amplification.
 
-## 安全性
+## Security
 
-- MAC 長度為 4 bytes，隨機猜測一個 token 的成功機率為 2<sup>-32</sup>，攻擊者平均需要約 2<sup>31</sup> 次線上查詢才能偽造一個可解析的名稱。需要更強保證時應加上查詢速率限制。
-- 相同 IPv4 永遠產生相同 token，旁觀者看不出 IPv4，但能看出兩個名稱指向同一位址。
-- 更換 secret 會讓所有既有 token 失效。
-- 只支援 IPv4（A record）。
+- The MAC is 4 bytes, so a random token is valid with probability 2<sup>-32</sup>; an attacker needs about 2<sup>31</sup> online queries on average to forge a resolvable name. Add query rate limiting if you need a stronger guarantee.
+- The same IPv4 address always yields the same token. Observers cannot see the address, but can tell that two names point to the same one.
+- Changing the secret invalidates all existing tokens.
+- Only IPv4 (A records) is supported.
 
-## 建置與推送 image
+## Building and pushing the image
 
-先登入 Docker Hub（只需一次）：
+Log in to Docker Hub (once):
 
 ```sh
 docker login
 ```
 
-使用 `scripts/image.sh`：
+Use `scripts/image.sh`:
 
 ```sh
-scripts/image.sh build          # 建置本機平台的 image，載入為 djosix/ripdns:latest，供本機測試
-scripts/image.sh push           # 建置 linux/amd64、linux/arm64 並推送 djosix/ripdns:latest
-scripts/image.sh push v0.1.0    # 同上，另外推送 djosix/ripdns:v0.1.0
+scripts/image.sh build          # build for this machine and load as djosix/ripdns:latest for local testing
+scripts/image.sh push           # build linux/amd64 and linux/arm64, push djosix/ripdns:latest
+scripts/image.sh push v0.1.0    # same, and also push djosix/ripdns:v0.1.0
 ```
 
-`push` 第一次執行時會建立名為 `ripdns` 的 buildx builder（docker-container driver），之後重複使用；推送完成後會列出 manifest 中的平台。build stage 在建置主機的平台上以 Go 交叉編譯，不需要 QEMU。image 會帶上 `org.opencontainers.image.revision` label 記錄 git commit，working tree 有未 commit 的修改時會加上 `-dirty` 並顯示警告。`IMAGE`、`PLATFORMS`、`BUILDER` 環境變數可覆寫預設值。
+The first `push` creates a buildx builder named `ripdns` (docker-container driver) and reuses it afterwards; after pushing, it lists the platforms in the manifest. The build stage runs on the build host's platform and cross-compiles with Go, so QEMU is not needed. The image carries an `org.opencontainers.image.revision` label with the git commit; if the working tree has uncommitted changes, `-dirty` is appended and a warning is printed. The `IMAGE`, `PLATFORMS` and `BUILDER` environment variables override the defaults.
 
-不使用腳本時的等效指令：
+Equivalent commands without the script:
 
 ```sh
-docker buildx create --name ripdns --driver docker-container   # 只需一次
+docker buildx create --name ripdns --driver docker-container   # once
 docker buildx build --builder ripdns --platform linux/amd64,linux/arm64 \
     -t djosix/ripdns:latest --push .
 ```
