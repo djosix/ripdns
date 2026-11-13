@@ -1,0 +1,17 @@
+services:
+  ripdns:
+    build: .
+    image: ripdns
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the container always listen on :53; choose the host address below.
+      RIPDNS_LISTEN: ":53"
+    ports:
+      # On Ubuntu with systemd-resolved, bind a specific host IP (see README).
+      - "${RIPDNS_HOST_IP:-0.0.0.0}:53:53/udp"
+      - "${RIPDNS_HOST_IP:-0.0.0.0}:53:53/tcp"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
