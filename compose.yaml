@@ -1,7 +1,7 @@
 services:
   ripdns:
     build: .
-    image: ripdns
+    image: djosix/ripdns:latest
     restart: unless-stopped
     env_file: .env
     environment:

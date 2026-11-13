@@ -118,14 +118,28 @@ ripdns decode a.web-147bcd0b56ab08fd.route.example.com   # 依名稱規則驗證
 dig @127.0.0.1 147bcd0b56ab08fd.route.example.com
 ```
 
-Docker：
+## Docker image
+
+image 發布於 Docker Hub 的 `djosix/ripdns`，支援 linux/amd64 與 linux/arm64。
 
 ```sh
-docker build -t ripdns .
-docker compose up -d     # 使用 compose.yaml，讀取 .env
+docker pull djosix/ripdns:latest
+
+docker run -d --name ripdns --restart unless-stopped \
+    -p 53:53/udp -p 53:53/tcp \
+    -e RIPDNS_BASE_DOMAIN=route.example.com \
+    -e RIPDNS_SECRET=<secret> \
+    -e RIPDNS_UPSTREAM=1.1.1.1,8.8.8.8 \
+    djosix/ripdns:latest
+
+# 產生 token
+docker run --rm -e RIPDNS_SECRET=<secret> -e RIPDNS_BASE_DOMAIN=route.example.com \
+    djosix/ripdns:latest encode 203.0.113.7
 ```
 
-container 以 uid 65534、`--read-only`、`cap_drop: ALL` 執行，Docker 預設在 container network namespace 允許非 root bind 53 port。
+也可以用 `--env-file .env -e RIPDNS_LISTEN=:53` 帶入設定，或直接 `docker compose up -d`（`compose.yaml` 會讀取 `.env`，本機沒有 image 時自動建置）。Ubuntu 上若保留 systemd-resolved，`-p` 需指定 host IP，例如 `-p 192.168.1.10:53:53/udp`，見下方說明。
+
+image 以 uid 65534 執行。bridge 網路下 Docker 預設允許 container 內的非 root 使用者 bind 53 port；改用 `--network host` 時不適用，需加上 `--user 0:0`。
 
 ## 在 Ubuntu 上執行
 
@@ -186,3 +200,29 @@ ns-route.example.com.  A   <ripdns 主機的公網 IP>
 - 相同 IPv4 永遠產生相同 token，旁觀者看不出 IPv4，但能看出兩個名稱指向同一位址。
 - 更換 secret 會讓所有既有 token 失效。
 - 只支援 IPv4（A record）。
+
+## 建置與推送 image
+
+先登入 Docker Hub（只需一次）：
+
+```sh
+docker login
+```
+
+使用 `scripts/image.sh`：
+
+```sh
+scripts/image.sh build          # 建置本機平台的 image，載入為 djosix/ripdns:latest，供本機測試
+scripts/image.sh push           # 建置 linux/amd64、linux/arm64 並推送 djosix/ripdns:latest
+scripts/image.sh push v0.1.0    # 同上，另外推送 djosix/ripdns:v0.1.0
+```
+
+`push` 第一次執行時會建立名為 `ripdns` 的 buildx builder（docker-container driver），之後重複使用；推送完成後會列出 manifest 中的平台。build stage 在建置主機的平台上以 Go 交叉編譯，不需要 QEMU。image 會帶上 `org.opencontainers.image.revision` label 記錄 git commit，working tree 有未 commit 的修改時會加上 `-dirty` 並顯示警告。`IMAGE`、`PLATFORMS`、`BUILDER` 環境變數可覆寫預設值。
+
+不使用腳本時的等效指令：
+
+```sh
+docker buildx create --name ripdns --driver docker-container   # 只需一次
+docker buildx build --builder ripdns --platform linux/amd64,linux/arm64 \
+    -t djosix/ripdns:latest --push .
+```
